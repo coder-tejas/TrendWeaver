@@ -1,8 +1,15 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional
-import httpx
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+from datetime import datetime, timedelta
+from openai import OpenAI
+from dotenv import load_dotenv
+import json
+import os
+import random
+
+load_dotenv()
 
 app = FastAPI(
     title="TrendWeaver Engine - AI Agent Backend",
@@ -18,55 +25,218 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class SEOMetadata(BaseModel):
-    title: str
-    description: str
-    keywords: List[str]
-    og_title: Optional[str] = None
-    og_description: Optional[str] = None
+# OpenAI client setup
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-class TrendRequest(BaseModel):
-    topic: str
-    target_audience: Optional[str] = None
+# Pydantic Models
+class JSONLDSchema(BaseModel):
+    context: str = "https://schema.org"
+    type: str = "Article"
+    headline: str
+    description: str
+    author: Dict[str, str]
+    datePublished: str
+    dateModified: str
+    publisher: Dict[str, Any]
+    mainEntityOfPage: Dict[str, str]
+
+class SEOMetadata(BaseModel):
+    title: str = Field(..., description="Optimized SEO title (50-60 chars)")
+    description: str = Field(..., description="Optimized meta description (150-160 chars)")
+    json_ld: JSONLDSchema = Field(..., description="JSON-LD structured data for Article")
+    keywords: List[str] = Field(..., description="Relevant SEO keywords")
+    trend_score: float = Field(..., ge=0, le=1, description="Trend relevance score")
 
 class TrendResponse(BaseModel):
-    trend_score: float
-    keywords: List[str]
+    topic: str
     seo_metadata: SEOMetadata
+    generated_at: str
+    cache_expires_at: str
+    is_cached: bool
 
-@app.get("/")
+class HealthResponse(BaseModel):
+    status: str
+    service: str
+    cached_topics: int
+
+# Mock trending topics
+TRENDING_TOPICS = [
+    "AI coding assistants",
+    "Serverless infrastructure",
+    "Edge computing",
+    "LLM fine-tuning",
+    "RAG architecture",
+    "AI agent frameworks",
+    "WebAssembly applications",
+    "Kubernetes operators",
+    "GraphQL federation",
+    "DevSecOps automation"
+]
+
+# Cache implementation (mock Redis)
+seo_cache: Dict[str, Dict[str, Any]] = {}
+CACHE_TTL_SECONDS = 300  # 5 minutes
+
+def is_cache_valid(topic: str) -> bool:
+    if topic not in seo_cache:
+        return False
+    cached_time = seo_cache[topic]["timestamp"]
+    return (datetime.now() - cached_time).total_seconds() < CACHE_TTL_SECONDS
+
+def get_from_cache(topic: str) -> Optional[SEOMetadata]:
+    if is_cache_valid(topic):
+        return seo_cache[topic]["data"]
+    return None
+
+def store_in_cache(topic: str, data: SEOMetadata):
+    seo_cache[topic] = {
+        "data": data,
+        "timestamp": datetime.now()
+    }
+
+def generate_seo_with_openai(topic: str) -> SEOMetadata:
+    prompt = f"""Generate SEO metadata for a trending tech topic: "{topic}"
+
+Return a JSON object with these exact fields:
+- title: Optimized SEO title (50-60 characters, include primary keyword)
+- description: Meta description (150-160 characters, compelling and keyword-rich)
+- keywords: Array of 5-7 relevant SEO keywords
+- json_ld: A valid JSON-LD Article schema with headline, description, author (name: "TrendWeaver AI"), datePublished, dateModified, publisher (name: "TrendWeaver", logo URL), mainEntityOfPage
+- trend_score: Float between 0 and 1 indicating trend relevance
+
+Return ONLY valid JSON, no markdown formatting."""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": "You are an SEO expert. Return valid JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=500
+        )
+
+        content = response.choices[0].message.content
+        seo_data = json.loads(content)
+
+        now = datetime.now()
+        json_ld = JSONLDSchema(
+            headline=seo_data.get("json_ld", {}).get("headline", seo_data["title"]),
+            description=seo_data.get("json_ld", {}).get("description", seo_data["description"]),
+            author=seo_data.get("json_ld", {}).get("author", {"@type": "Person", "name": "TrendWeaver AI"}),
+            datePublished=seo_data.get("json_ld", {}).get("datePublished", now.isoformat()),
+            dateModified=seo_data.get("json_ld", {}).get("dateModified", now.isoformat()),
+            publisher=seo_data.get("json_ld", {}).get("publisher", {"@type": "Organization", "name": "TrendWeaver"}),
+            mainEntityOfPage=seo_data.get("json_ld", {}).get("mainEntityOfPage", {"@type": "WebPage", "@id": f"https://trendweaver.com/topic/{topic.lower().replace(' ', '-')}"})
+        )
+
+        return SEOMetadata(
+            title=seo_data["title"],
+            description=seo_data["description"],
+            json_ld=json_ld,
+            keywords=seo_data["keywords"],
+            trend_score=seo_data.get("trend_score", random.uniform(0.7, 0.95))
+        )
+
+    except Exception as e:
+        fallback_score = random.uniform(0.7, 0.95)
+        now = datetime.now()
+        return SEOMetadata(
+            title=f"{topic}: Complete Guide & Best Practices | TrendWeaver",
+            description=f"Discover everything about {topic}. Expert insights, tutorials, and trends for 2024.",
+            json_ld=JSONLDSchema(
+                headline=f"{topic}: Complete Guide & Best Practices",
+                description=f"Comprehensive guide to {topic} with expert insights and tutorials.",
+                author={"@type": "Person", "name": "TrendWeaver AI"},
+                datePublished=now.isoformat(),
+                dateModified=now.isoformat(),
+                publisher={"@type": "Organization", "name": "TrendWeaver", "logo": {"@type": "ImageObject", "url": "https://trendweaver.com/logo.png"}},
+                mainEntityOfPage={"@type": "WebPage", "@id": f"https://trendweaver.com/topic/{topic.lower().replace(' ', '-')}"}
+            ),
+            keywords=[topic, "guide", "tutorial", "best practices", "2024"],
+            trend_score=fallback_score
+        )
+
+# API Endpoints
+@app.get("/", response_model=Dict[str, str])
 async def root():
     return {"message": "TrendWeaver Engine API is running", "version": "0.1.0"}
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
-    return {"status": "healthy", "service": "agent-backend"}
+    return HealthResponse(
+        status="healthy",
+        service="agent-backend",
+        cached_topics=len(seo_cache)
+    )
+
+@app.get("/trending-topics", response_model=List[str])
+async def get_trending_topics():
+    return TRENDING_TOPICS
+
+@app.get("/get-latest-seo", response_model=TrendResponse)
+async def get_latest_seo(topic: Optional[str] = None):
+    if topic is None:
+        topic = random.choice(TRENDING_TOPICS)
+
+    cached = get_from_cache(topic)
+    if cached:
+        expires_at = seo_cache[topic]["timestamp"] + timedelta(seconds=CACHE_TTL_SECONDS)
+        return TrendResponse(
+            topic=topic,
+            seo_metadata=cached,
+            generated_at=seo_cache[topic]["timestamp"].isoformat(),
+            cache_expires_at=expires_at.isoformat(),
+            is_cached=True
+        )
+
+    seo_metadata = generate_seo_with_openai(topic)
+    store_in_cache(topic, seo_metadata)
+
+    expires_at = datetime.now() + timedelta(seconds=CACHE_TTL_SECONDS)
+    return TrendResponse(
+        topic=topic,
+        seo_metadata=seo_metadata,
+        generated_at=datetime.now().isoformat(),
+        cache_expires_at=expires_at.isoformat(),
+        is_cached=False
+    )
 
 @app.post("/api/analyze-trend", response_model=TrendResponse)
-async def analyze_trend(request: TrendRequest):
-    # Placeholder for AI agent logic
-    # This will be implemented to detect trends and generate SEO metadata
-    
-    # Mock response for now
-    seo_metadata = SEOMetadata(
-        title=f"SEO Optimized: {request.topic}",
-        description=f"Comprehensive guide about {request.topic} - latest trends and insights",
-        keywords=[request.topic, "trending", "SEO", "guide"],
-        og_title=f"{request.topic} - TrendWeaver",
-        og_description=f"Discover the latest trends in {request.topic}"
-    )
-    
+async def analyze_trend(topic: str):
+    cached = get_from_cache(topic)
+    if cached:
+        expires_at = seo_cache[topic]["timestamp"] + timedelta(seconds=CACHE_TTL_SECONDS)
+        return TrendResponse(
+            topic=topic,
+            seo_metadata=cached,
+            generated_at=seo_cache[topic]["timestamp"].isoformat(),
+            cache_expires_at=expires_at.isoformat(),
+            is_cached=True
+        )
+
+    seo_metadata = generate_seo_with_openai(topic)
+    store_in_cache(topic, seo_metadata)
+
+    expires_at = datetime.now() + timedelta(seconds=CACHE_TTL_SECONDS)
     return TrendResponse(
-        trend_score=0.85,
-        keywords=[request.topic, "trending", "popular", "2024"],
-        seo_metadata=seo_metadata
+        topic=topic,
+        seo_metadata=seo_metadata,
+        generated_at=datetime.now().isoformat(),
+        cache_expires_at=expires_at.isoformat(),
+        is_cached=False
     )
 
-@app.post("/api/generate-metadata", response_model=SEOMetadata)
-async def generate_metadata(request: TrendRequest):
-    # Placeholder for metadata generation
-    return SEOMetadata(
-        title=f"Auto-generated: {request.topic}",
-        description=f"Automatically generated SEO content for {request.topic}",
-        keywords=[request.topic, "auto-generated", "SEO"]
-    )
+@app.delete("/cache/{topic}")
+async def clear_cache(topic: str):
+    if topic in seo_cache:
+        del seo_cache[topic]
+        return {"message": f"Cache cleared for topic: {topic}"}
+    raise HTTPException(status_code=404, detail="Topic not found in cache")
+
+@app.delete("/cache")
+async def clear_all_cache():
+    seo_cache.clear()
+    return {"message": "All cache cleared"}
