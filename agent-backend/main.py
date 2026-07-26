@@ -60,6 +60,23 @@ class HealthResponse(BaseModel):
     service: str
     cached_topics: int
 
+class TrackedKeyword(BaseModel):
+    keyword: str
+    volume: int
+    trend: str
+    score: float
+
+class DashboardStats(BaseModel):
+    current_trending_keyword: str
+    win_potential: int
+    overall_seo_score: int
+    metadata_synced: int
+    cached_topics: int
+    crawler_visits_today: int
+    tracked_keywords: List[TrackedKeyword]
+    last_updated: str
+    agent_status: str
+
 # Mock trending topics
 TRENDING_TOPICS = [
     "AI coding assistants",
@@ -240,3 +257,28 @@ async def clear_cache(topic: str):
 async def clear_all_cache():
     seo_cache.clear()
     return {"message": "All cache cleared"}
+
+@app.get("/dashboard-stats", response_model=DashboardStats)
+async def get_dashboard_stats():
+    tracked_keywords = [
+        TrackedKeyword(keyword="AI coding assistants", volume=142000, trend="rising", score=0.92),
+        TrackedKeyword(keyword="Serverless infrastructure", volume=98000, trend="stable", score=0.85),
+        TrackedKeyword(keyword="Edge computing", volume=87500, trend="rising", score=0.88),
+        TrackedKeyword(keyword="LLM fine-tuning", volume=76000, trend="rising", score=0.91),
+        TrackedKeyword(keyword="RAG architecture", volume=65000, trend="rising", score=0.87),
+        TrackedKeyword(keyword="AI agent frameworks", volume=54000, trend="rising", score=0.89),
+        TrackedKeyword(keyword="Kubernetes operators", volume=43000, trend="stable", score=0.78),
+        TrackedKeyword(keyword="DevSecOps automation", volume=38000, trend="stable", score=0.75),
+    ]
+
+    return DashboardStats(
+        current_trending_keyword=random.choice(TRENDING_TOPICS),
+        win_potential=random.randint(72, 94),
+        overall_seo_score=random.randint(58, 82),
+        metadata_synced=97,
+        cached_topics=len(seo_cache),
+        crawler_visits_today=random.randint(12, 45),
+        tracked_keywords=tracked_keywords,
+        last_updated=datetime.now().isoformat(),
+        agent_status="active"
+    )
